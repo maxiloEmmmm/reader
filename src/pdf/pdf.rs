@@ -94,7 +94,7 @@ impl Tokenizer {
     pub fn parse_object(&mut self) -> Option<Object> {
         loop {
             match self.data[self.pos] {
-                b'+' | b'-' | b'0'..b'9' | b'.' => {
+                b'+' | b'-' | b'0'..=b'9' | b'.' => {
                     return self.parse_number();
                 }
                 _ => {
