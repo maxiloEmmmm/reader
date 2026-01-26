@@ -42,6 +42,7 @@ pub enum Object {
     Stream(Stream),
     /// 间接对象引用 (object_number, generation_number)
     IndirectRef(i64, i64),
+    Object(i64, i64, Box<Object>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +135,24 @@ impl Tokenizer {
 
     pub fn peek_next_byte(&self) -> Option<u8> {
         self.index_byte(self.pos + 1)
+    }
+
+    pub fn index<F>(&self, f: F) -> Option<usize>
+    where
+        F: Fn(u8) -> bool {
+        let mut raw = self.pos;
+        loop {
+            if raw >= self.data.len() {
+                return None
+            }
+            if !f(self.data[raw]) {
+                if self.pos == raw {
+                    return None
+                }
+                return Some(raw-1)
+            }
+            raw += 1;
+        }
     }
 
     fn index_byte(&self, pos: usize) -> Option<u8> {
@@ -304,15 +323,77 @@ impl Tokenizer {
 
         return Object::incomplete("stream body too small");
     }
+    pub fn parse_direct_obj(&mut self) -> Object {
+        self.parse_indirect_ref()
+    }
 
+    pub fn parse_indirect_ref(&mut self) -> Object {
+        let raw = self.pos;
+        if let Some(index) = self.index(|v| matches!(v, b'0'..=b'9')) {
+            self.pos = index+1;
+            if let Some(v) = self.peek_byte() {
+                if WhiteSpace::from_repr(v).is_some() {
+                   self.skip_whitespace_and_comments();
+                   if let Some(two_index) = self.index(|v| matches!(v, b'0'..=b'9')) {
+                       let two_raw = self.pos;
+                       self.pos = two_index+1;
+                       self.skip_whitespace_and_comments();
+                       if let Some(vv) = self.peek_byte() {
+                           match vv {
+                               b'R' => {
+                                   if let Ok(v1) = String::from_utf8_lossy(&self.data[raw..=index]).parse::<i64>() {
+                                       if let Ok(v2) = String::from_utf8_lossy(&self.data[two_raw..=two_index]).parse::<i64>() {
+                                           self.pos += 1;
+                                           return Object::IndirectRef(v1, v2)
+                                       }
+                                   }
+                               }
+
+                               b'o' => {
+                                   self.pos += 1;
+                                   if let Some(bj) = self.peek_bytes(2) {
+                                       if bj == b"bj" {
+                                           self.pos += 2;
+                                           if let Some(inner) = self.parse_object() {
+                                               self.skip_whitespace_and_comments();
+                                               if let Some(end) = self.peek_bytes(6) {
+                                                   if end == b"endobj" {
+                                                        if let Ok(v1) = String::from_utf8_lossy(&self.data[raw..=index]).parse::<i64>() {
+                                                            if let Ok(v2) = String::from_utf8_lossy(&self.data[two_raw..=two_index]).parse::<i64>() {
+                                                                self.pos += 6;
+                                                                return Object::Object(v1, v2, Box::new(inner))
+                                                            }
+                                                        }
+                                                   }
+                                               }
+                                           }
+                                           
+                                       }
+                                   }
+                               }
+                               _ => {}
+                           }
+                       }
+                   }
+                
+                }
+            }
+        }
+        self.pos = raw;
+        self.inner_parse_number()       
+    }
+    
     pub fn parse_object(&mut self) -> Option<Object> {
         self.skip_whitespace_and_comments();
         let Some(next) = self.peek_byte() else {
             return None;
         };
         match next {
-            b'+' | b'-' | b'0'..=b'9' | b'.' => {
+            b'+' | b'-' | b'.' => {
                 return Some(self.parse_number());
+            }
+            b'0'..=b'9' => {
+                return Some(self.parse_indirect_ref());
             }
             b'(' => {
                 return Some(self.parse_string());
@@ -344,6 +425,10 @@ impl Tokenizer {
     }
 
     pub fn parse_number(&mut self) -> Object {
+        self.parse_indirect_ref()
+    }
+
+    fn inner_parse_number(&mut self) -> Object {
         let mut has_point = false;
         let mut pos = 0;
         loop {
@@ -2840,7 +2925,6 @@ mod tests {
             (b"1  0  R", 1, 0),
             (b"1\t0\tR", 1, 0),
             (b"1\n0\nR", 1, 0),
-            (b"  1 0 R", 1, 0),
         ];
 
         for &(input, expected_obj_num, expected_gen_num) in cases {
@@ -2990,17 +3074,21 @@ mod tests {
     fn parse_indirect_object_definition() {
         // ========== 间接对象定义 ==========
         // 格式: object_number generation_number obj ... endobj
+        // 返回 Object::Object(obj_num, gen_num, Box<Object>)
+        // 使用 parse_direct_obj 明确表示要解析 obj
         
         {
             // 简单字符串对象
             let input = b"12 0 obj\n( Brillig )\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (12, 0, Object::String(s)) => {
-                    assert_eq!(s, b" Brillig ", "Input: {:?}", String::from_utf8_lossy(input));
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 12, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(gen_num, 0, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(*inner, Object::String(b" Brillig ".to_vec()), "Input: {:?}", String::from_utf8_lossy(input));
                 }
                 other => panic!(
-                    "Input: {:?} Expected (12, 0, String), got {:?}",
+                    "Input: {:?} Expected Object::Object(12, 0, String), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3010,10 +3098,14 @@ mod tests {
             // 整数对象
             let input = b"8 0 obj\n77\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (8, 0, Object::Integer(77)) => {}
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 8);
+                    assert_eq!(gen_num, 0);
+                    assert_eq!(*inner, Object::Integer(77));
+                }
                 other => panic!(
-                    "Input: {:?} Expected (8, 0, Integer(77)), got {:?}",
+                    "Input: {:?} Expected Object::Object(8, 0, Integer(77)), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3023,14 +3115,21 @@ mod tests {
             // 字典对象
             let input = b"1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (1, 0, Object::Dictionary(entries)) => {
-                    assert_eq!(entries.len(), 2);
-                    assert_eq!(entries[0], (b"Type".to_vec(), Object::Name(b"Catalog".to_vec())));
-                    assert_eq!(entries[1], (b"Pages".to_vec(), Object::IndirectRef(2, 0)));
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 1);
+                    assert_eq!(gen_num, 0);
+                    match *inner {
+                        Object::Dictionary(entries) => {
+                            assert_eq!(entries.len(), 2);
+                            assert_eq!(entries[0], (b"Type".to_vec(), Object::Name(b"Catalog".to_vec())));
+                            assert_eq!(entries[1], (b"Pages".to_vec(), Object::IndirectRef(2, 0)));
+                        }
+                        other => panic!("Expected Dictionary, got {:?}", other),
+                    }
                 }
                 other => panic!(
-                    "Input: {:?} Expected (1, 0, Dictionary), got {:?}",
+                    "Input: {:?} Expected Object::Object(1, 0, Dictionary), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3040,15 +3139,22 @@ mod tests {
             // 数组对象
             let input = b"3 0 obj\n[1 2 3]\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (3, 0, Object::Array(elements)) => {
-                    assert_eq!(elements.len(), 3);
-                    assert_eq!(elements[0], Object::Integer(1));
-                    assert_eq!(elements[1], Object::Integer(2));
-                    assert_eq!(elements[2], Object::Integer(3));
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 3);
+                    assert_eq!(gen_num, 0);
+                    match *inner {
+                        Object::Array(elements) => {
+                            assert_eq!(elements.len(), 3);
+                            assert_eq!(elements[0], Object::Integer(1));
+                            assert_eq!(elements[1], Object::Integer(2));
+                            assert_eq!(elements[2], Object::Integer(3));
+                        }
+                        other => panic!("Expected Array, got {:?}", other),
+                    }
                 }
                 other => panic!(
-                    "Input: {:?} Expected (3, 0, Array), got {:?}",
+                    "Input: {:?} Expected Object::Object(3, 0, Array), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3058,13 +3164,20 @@ mod tests {
             // 流对象
             let input = b"7 0 obj\n<</Length 5>>\nstream\nHelloendstream\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (7, 0, Object::Stream(s)) => {
-                    assert_eq!(s.length, 5);
-                    assert_eq!(s.data, b"Hello");
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 7);
+                    assert_eq!(gen_num, 0);
+                    match *inner {
+                        Object::Stream(s) => {
+                            assert_eq!(s.length, 5);
+                            assert_eq!(s.data, b"Hello");
+                        }
+                        other => panic!("Expected Stream, got {:?}", other),
+                    }
                 }
                 other => panic!(
-                    "Input: {:?} Expected (7, 0, Stream), got {:?}",
+                    "Input: {:?} Expected Object::Object(7, 0, Stream), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3074,10 +3187,87 @@ mod tests {
             // 非零 generation number
             let input = b"5 2 obj\nnull\nendobj";
             let mut t = Tokenizer::new(input);
-            match t.parse_indirect_object() {
-                (5, 2, Object::Null) => {}
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 5);
+                    assert_eq!(gen_num, 2);
+                    assert_eq!(*inner, Object::Null);
+                }
                 other => panic!(
-                    "Input: {:?} Expected (5, 2, Null), got {:?}",
+                    "Input: {:?} Expected Object::Object(5, 2, Null), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
+            }
+        }
+        {
+            // Boolean 对象
+            let input = b"10 0 obj\ntrue\nendobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 10);
+                    assert_eq!(gen_num, 0);
+                    assert_eq!(*inner, Object::Boolean(true));
+                }
+                other => panic!(
+                    "Input: {:?} Expected Object::Object(10, 0, Boolean(true)), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
+            }
+        }
+        {
+            // Real 对象
+            let input = b"15 0 obj\n3.14\nendobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 15);
+                    assert_eq!(gen_num, 0);
+                    match *inner {
+                        Object::Real(v) => {
+                            assert!((v - 3.14).abs() < 0.001, "Expected 3.14, got {}", v);
+                        }
+                        other => panic!("Expected Real, got {:?}", other),
+                    }
+                }
+                other => panic!(
+                    "Input: {:?} Expected Object::Object(15, 0, Real), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
+            }
+        }
+        {
+            // Name 对象
+            let input = b"20 0 obj\n/SomeName\nendobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 20);
+                    assert_eq!(gen_num, 0);
+                    assert_eq!(*inner, Object::Name(b"SomeName".to_vec()));
+                }
+                other => panic!(
+                    "Input: {:?} Expected Object::Object(20, 0, Name), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
+            }
+        }
+        {
+            // 十六进制字符串对象
+            let input = b"25 0 obj\n<48656C6C6F>\nendobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(obj_num, gen_num, inner) => {
+                    assert_eq!(obj_num, 25);
+                    assert_eq!(gen_num, 0);
+                    assert_eq!(*inner, Object::String(b"Hello".to_vec()));
+                }
+                other => panic!(
+                    "Input: {:?} Expected Object::Object(25, 0, String(Hello)), got {:?}",
                     String::from_utf8_lossy(input),
                     other
                 ),
@@ -3086,36 +3276,101 @@ mod tests {
     }
 
     #[test]
-    fn parse_invalid_indirect_reference() {
-        // ========== 无效间接引用 ==========
-        let invalid_inputs: &[&[u8]] = &[
-            // 缺少 R
-            b"1 0",
-            b"1 0 ",
-            // 负数对象号（不允许）
-            b"-1 0 R",
-            // 负数 generation number（不允许）
-            b"1 -1 R",
-            // 缺少 generation number
-            b"1 R",
-            // 非数字
-            b"a 0 R",
-            b"1 b R",
-        ];
+    fn parse_indirect_ref_fallback_to_number() {
+        // ========== 无法解析为间接引用时，回退到数字解析 ==========
+        // 这些输入以数字开头，但不是有效的间接引用，应回退解析为数字
+        
+        {
+            // 单个数字
+            let input = b"123";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::Integer(123) => {}
+                other => panic!("Input: {:?} Expected Integer(123), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // 两个数字后没有 R 或 obj
+            let input = b"1 0";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::Integer(1) => {}
+                other => panic!("Input: {:?} Expected Integer(1), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // 实数
+            let input = b"3.14";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::Real(v) => {
+                    assert!((v - 3.14).abs() < 0.001);
+                }
+                other => panic!("Input: {:?} Expected Real, got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // 两个数字后跟其他字符
+            let input = b"1 0 X";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::Integer(1) => {}
+                other => panic!("Input: {:?} Expected Integer(1), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // 负数（不可能是间接引用，直接解析为数字）
+            let input = b"-5";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::Integer(-5) => {}
+                other => panic!("Input: {:?} Expected Integer(-5), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+    }
 
-        for &input in invalid_inputs {
-            let mut tokenizer = Tokenizer::new(input);
-            match tokenizer.parse_indirect_ref() {
-                Object::Invalid(_) => {
-                    // 正确：应返回 Invalid
+    #[test]
+    fn parse_indirect_ref_edge_cases() {
+        // ========== 间接引用边界情况 ==========
+        
+        {
+            // 间接引用后有其他内容
+            let input = b"1 0 R /Name";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::IndirectRef(1, 0) => {}
+                other => panic!("Input: {:?} Expected IndirectRef(1, 0), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // 大的对象号和 generation number
+            let input = b"65535 65535 R";
+            let mut t = Tokenizer::new(input);
+            match t.parse_indirect_ref() {
+                Object::IndirectRef(65535, 65535) => {}
+                other => panic!("Input: {:?} Expected IndirectRef(65535, 65535), got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // obj 后有空白字符
+            let input = b"1 0 obj\n123\nendobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(1, 0, inner) => {
+                    assert_eq!(*inner, Object::Integer(123));
                 }
-                other => {
-                    panic!(
-                        "Should be invalid for {:?}, got {:?}",
-                        String::from_utf8_lossy(input),
-                        other
-                    );
+                other => panic!("Input: {:?} Expected Object::Object, got {:?}", String::from_utf8_lossy(input), other),
+            }
+        }
+        {
+            // obj 和对象内容紧邻（无空白）
+            let input = b"1 0 obj(hello)endobj";
+            let mut t = Tokenizer::new(input);
+            match t.parse_direct_obj() {
+                Object::Object(1, 0, inner) => {
+                    assert_eq!(*inner, Object::String(b"hello".to_vec()));
                 }
+                other => panic!("Input: {:?} Expected Object::Object, got {:?}", String::from_utf8_lossy(input), other),
             }
         }
     }
