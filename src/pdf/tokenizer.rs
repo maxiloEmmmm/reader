@@ -1,4 +1,5 @@
-use std::{env::JoinPathsError, io::{Read, Seek}, string::FromUtf8Error};
+use core::slice;
+use std::{env::JoinPathsError, io::{self, Read, Seek}, string::FromUtf8Error};
 
 use strum_macros::FromRepr;
 
@@ -95,6 +96,7 @@ pub struct Tokenizer<T: Source> {
     buf: Vec<u8>,
     pos: usize,
     len: usize,
+    seek: i64,
 }
 
 impl<T: Source> Seek for Tokenizer<T> {
@@ -106,18 +108,77 @@ impl<T: Source> Seek for Tokenizer<T> {
 }
 
 impl<T: Source> Tokenizer<T> {
+    pub fn peek_byte(&mut self) -> Result<u8, io::Error> {
+        self.index_byte(self.pos)
+    }
+
+    pub fn peek_next_byte(&mut self) -> Result<u8, io::Error> {
+        self.index_byte(self.pos + 1)
+    }
+
+
+    pub fn index<F>(&self, f: F) -> Option<usize>
+    where
+        F: Fn(u8) -> bool {
+        let mut raw = self.pos;
+        loop {
+            if raw >= self.data.len() {
+                return None
+            }
+            if !f(self.data[raw]) {
+                if self.pos == raw {
+                    return None
+                }
+                return Some(raw-1)
+            }
+            raw += 1;
+        }
+    }
+
+    fn index_byte(&mut self, pos: usize) -> Result<u8, io::Error> {
+        if pos >= self.buf.len() {
+            let mut single = 0_u8;
+            self.src.seek_relative(pos as i64)?;
+            self.src.read_exact(slice::from_mut(&mut single));
+            return Ok(single)
+        }
+        Ok(self.buf[pos])
+    }
+
+    
+}
+
+impl<T: Source> Tokenizer<T> {
     pub fn new(src: T) -> Self {
         Self {
             src: src,
+            len: 0,
             pos: 0,
             buf: Vec::with_capacity(1024*8),
+            seek: 0,
+        }
+    }
+
+    pub fn skip_not_skitespace_and_comments(&mut self) {
+        loop {
+            let Ok(next) = self.peek_byte() else {
+                return
+            };
+
+            if WhiteSpace::from_repr(next).is_some() {
+                return  
+            }
+
+            if next == b'%' {
+                return
+            }
         }
     }
 
     pub fn skip_whitespace_and_comments(&mut self) {
         let mut in_comment = false;
         loop {
-            if self.peek_byte().is_none() {
+            if self.peek_byte().is_ok() {
                 break;
             }
 
@@ -145,42 +206,6 @@ impl<T: Source> Tokenizer<T> {
             }
             self.pos += 1;
         }
-    }
-
-    pub fn peek_byte(&mut self) -> Option<u8> {
-        self.index_byte(self.pos)
-    }
-
-    pub fn peek_next_byte(&mut self) -> Option<u8> {
-        self.index_byte(self.pos + 1)
-    }
-
-    pub fn index<F>(&self, f: F) -> Option<usize>
-    where
-        F: Fn(u8) -> bool {
-        let mut raw = self.pos;
-        loop {
-            if raw >= self.data.len() {
-                return None
-            }
-            if !f(self.data[raw]) {
-                if self.pos == raw {
-                    return None
-                }
-                return Some(raw-1)
-            }
-            raw += 1;
-        }
-    }
-
-    fn index_byte(&mut self, pos: usize) -> Option<u8> {
-        if self.pos >= self.len {
-            match self.src.read(self.buf) {
-                
-            }
-            return None;
-        }
-        Some(self.data[pos])
     }
 
     pub fn parse_boolean(&mut self) -> Object {

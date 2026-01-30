@@ -4,6 +4,8 @@ use crate::pdf::tokenizer::{Source, Tokenizer};
 
 use thiserror::Error;
 
+const TRAILER_TOKEN: &str = "trailer";
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("invalid resource {0}")]
@@ -14,7 +16,7 @@ pub enum Error {
 
 
 pub struct Pdf<T: Source> {
-    token: Tokenizer<T>
+    token: Tokenizer<T>,
     start_xref: usize,
 }
 
@@ -23,7 +25,12 @@ impl<T: Source> Pdf<T> {
         let mut token = Tokenizer::new(r);
 
         token.seek(std::io::SeekFrom::End(1024))?;
-        token.skip_whitespace_and_comments();
+        loop {
+            token.skip_whitespace_and_comments();
+            if token.peek_bytes(n)? != TRAILER_TOKEN {
+                
+            }
+        }
         
         
         Ok(Self {
