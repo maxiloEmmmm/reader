@@ -1,5 +1,5 @@
 use core::slice;
-use std::{env::JoinPathsError, io::{self, Read, Seek}, string::FromUtf8Error};
+use std::{env::JoinPathsError, io::{self, ErrorKind, Read, Seek}, ops::Range, string::FromUtf8Error};
 
 use strum_macros::FromRepr;
 
@@ -96,14 +96,15 @@ pub struct Tokenizer<T: Source> {
     buf: Vec<u8>,
     pos: usize,
     len: usize,
-    seek: i64,
+    _seek: u64,
 }
 
 impl<T: Source> Seek for Tokenizer<T> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.pos = 0;
         self.len = 0;
-        self.src.seek(pos)
+        self._seek = self.src.seek(pos)?;
+        Ok(self._seek)
     }
 }
 
@@ -116,22 +117,62 @@ impl<T: Source> Tokenizer<T> {
         self.index_byte(self.pos + 1)
     }
 
+    pub fn ensure(&mut self, n: usize) -> io::Result<()> {
+        let remaining = self.buf.len() - self.pos;
+        if remaining >= n {
+            return Ok(())
+        }
 
-    pub fn index<F>(&self, f: F) -> Option<usize>
+        if self.pos > 0 {
+            self.buf.copy_within(self.pos.., 0);
+            self.buf.truncate(remaining);
+            self.pos = 0;
+        }
+
+        let n = self.src.read(&mut self.buf[remaining..])?;
+        self._seek += n;
+        self.buf.truncate(remaining + n);
+        Ok(())
+    }
+
+    pub fn current_pos(&self) -> usize {
+        self.pos
+    }
+
+    pub fn current(&self) -> u8 {
+        self.buf[self.pos]
+    }
+
+    pub fn consume(&mut self) -> io::Result<u8> {
+        self.ensure(1)?;
+        let n = self.current();
+        self.pos += 1;
+        Ok(n)
+    }
+
+    pub fn back(&mut self, n: usize) -> io::Result<()> {
+        if self.pos >= n {
+            self.pos -= n;
+        }else {
+            if self._seek >= n as u64 {
+                self.seek(io::SeekFrom::Start(self._seek - n as u64))?;
+            }else {
+                return Err(io::Error::new(ErrorKind::NotSeekable, "back too more!"))
+            }
+        }
+        Ok(())
+    }
+
+
+    pub fn index<F>(&mut self, f: F) -> Result<Range<u64>, io::Error>
     where
         F: Fn(u8) -> bool {
-        let mut raw = self.pos;
+        let start = self.seek;
         loop {
-            if raw >= self.data.len() {
-                return None
+            if !f(self.consume()?) {
+                self.back(1)?;
+                return Ok(start..self._seek + self.current_pos() as u64)
             }
-            if !f(self.data[raw]) {
-                if self.pos == raw {
-                    return None
-                }
-                return Some(raw-1)
-            }
-            raw += 1;
         }
     }
 
@@ -139,7 +180,7 @@ impl<T: Source> Tokenizer<T> {
         if pos >= self.buf.len() {
             let mut single = 0_u8;
             self.src.seek_relative(pos as i64)?;
-            self.src.read_exact(slice::from_mut(&mut single));
+            self.src.read_exact(slice::from_mut(&mut single))?;
             return Ok(single)
         }
         Ok(self.buf[pos])
@@ -701,9 +742,7 @@ impl<T: Source> Tokenizer<T> {
         }
     }
 
-    pub fn current(&self) -> u8 {
-        self.data[self.pos]
-    }
+    
 
     pub fn peek_back(&self, n: usize) -> &[u8] {
         &self.data[self.pos - n..self.pos]
