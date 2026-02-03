@@ -69,17 +69,13 @@ impl<T: Source> Pdf<T> {
                             match token.parse_number() {
                                 Object::Integer(n) => {
                                     start_xref = n as usize;
-                                    token.skip_whitespace_and_comments()?;
-                                    println!("1 {} {}", token.left_pos(), token.end_pos());
+                                    token.skip_whitespace()?;
                                     if let Some(v) = token.read_bytes(5)? {
-                                        println!("222");
                                         if v.as_ref() == b"%%EOF" {
                                             token.skip_whitespace_and_comments()?;
                                             if !token.ensure(1)? {
-                                                println!("end");
                                                 break
                                             }
-                                            println!("other!!")
                                         }
                                     }
                                 },
@@ -89,7 +85,7 @@ impl<T: Source> Pdf<T> {
                     }
                 }
             }
-            token.skip_not_skitespace_and_comments()?;
+            token.skip_whitespace_and_comments()?;
         }
 
         Ok(Self {

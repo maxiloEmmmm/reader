@@ -1,5 +1,11 @@
 use core::slice;
-use std::{borrow::Cow, env::JoinPathsError, io::{self, ErrorKind, Read, Seek}, ops::Range, string::FromUtf8Error};
+use std::{
+    borrow::Cow,
+    env::JoinPathsError,
+    io::{self, ErrorKind, Read, Seek},
+    ops::Range,
+    string::FromUtf8Error,
+};
 
 use strum_macros::FromRepr;
 
@@ -52,8 +58,6 @@ impl From<io::Error> for Object {
     }
 }
 
-
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stream {
     /// 流的原始字节数据
@@ -96,12 +100,9 @@ impl Object {
     }
 }
 
-pub trait Source: Read + Seek {
-    
-}
+pub trait Source: Read + Seek {}
 
 impl<T: Read + Seek> Source for T {}
-
 
 pub struct Tokenizer<T: Source> {
     src: T,
@@ -118,18 +119,17 @@ impl<T: Source> Seek for Tokenizer<T> {
             io::SeekFrom::Start(n) => {
                 if n >= self.start_pos() && n <= self.end_pos() {
                     self.pos = (n as u64 - self.start_pos()) as usize;
-                    self._seek = self.src.seek(pos)?;
-                    return Ok(self._seek)
+                    // 这里不进行底层的 seek 因为这里要服用 所以只要从 正确的位置开始读即可
+                    return Ok(self._seek);
                 }
-            },
-            io::SeekFrom::End(_) => {},
+            }
+            io::SeekFrom::End(_) => {}
             io::SeekFrom::Current(n) => {
-                if n > 0 && n < self.len as i64 {
+                if n > 0 && n < (self.len - self.pos) as i64 {
                     self.pos += n as usize;
-                    self._seek = self.src.seek(pos)?;
-                    return Ok(self._seek)
+                    return Ok(self._seek);
                 }
-            },
+            }
         }
         self.pos = 0;
         self.len = 0;
@@ -144,7 +144,7 @@ impl<T: Source> Tokenizer<T> {
     pub fn ensure(&mut self, mut n: usize) -> io::Result<bool> {
         let remaining = self.len - self.pos;
         if remaining >= n {
-            return Ok(true)
+            return Ok(true);
         }
 
         if self.pos > 0 {
@@ -164,14 +164,13 @@ impl<T: Source> Tokenizer<T> {
         self.pos
     }
 
-
     pub fn current(&self) -> u8 {
         self.buf[self.pos]
     }
 
     pub fn consume(&mut self) -> io::Result<Option<u8>> {
         if !self.ensure(1)? {
-            return Ok(None)
+            return Ok(None);
         }
         let n = self.current();
         self.pos += 1;
@@ -181,41 +180,41 @@ impl<T: Source> Tokenizer<T> {
     pub fn back(&mut self, n: usize) -> io::Result<()> {
         if self.pos >= n {
             self.pos -= n;
-        }else {
+        } else {
             if self.start_pos() >= n as u64 {
                 self.seek(io::SeekFrom::Start(self.start_pos() - n as u64))?;
-            }else {
-                return Err(io::Error::new(ErrorKind::NotSeekable, "back too more!"))
+            } else {
+                return Err(io::Error::new(ErrorKind::NotSeekable, "back too more!"));
             }
         }
         Ok(())
     }
 
     pub fn left_pos(&self) -> u64 {
-        self._seek + self.pos as u64
+        self._seek + self.pos as u64 - self.len as u64
     }
 
     pub fn end_pos(&self) -> u64 {
-        self._seek + self.len as u64
+        self._seek as u64
     }
 
     pub fn start_pos(&self) -> u64 {
-        self._seek
+        self._seek - self.len as u64
     }
-
 
     pub fn index<F>(&mut self, f: F) -> Result<Range<u64>, io::Error>
     where
-        F: Fn(u8) -> bool {
+        F: Fn(u8) -> bool,
+    {
         let start = self.left_pos();
         loop {
             let Some(next) = self.consume()? else {
-                return Err(io::Error::new(ErrorKind::UnexpectedEof, "index"))
+                return Err(io::Error::new(ErrorKind::UnexpectedEof, "index"));
             };
-            
+
             if !f(next) {
                 self.back(1)?;
-                return Ok(start..self.left_pos())
+                return Ok(start..self.left_pos());
             }
         }
     }
@@ -223,13 +222,13 @@ impl<T: Source> Tokenizer<T> {
     pub fn read_range(&mut self, r: Range<u64>) -> io::Result<Option<Cow<[u8]>>> {
         let len = r.end - r.start;
         if len <= 0 {
-            return Ok(None)
+            return Ok(None);
         }
         let start = self.start_pos();
         if r.start >= start {
             self.pos = (r.start - start) as usize;
-            return self.read_bytes(len as usize)
-        }else {
+            return self.read_bytes(len as usize);
+        } else {
             self.seek(io::SeekFrom::Current(r.start as i64))?;
         }
         self.read_bytes(len as usize)
@@ -254,7 +253,7 @@ impl<T: Source> Tokenizer<T> {
     pub fn read_back(&mut self, n: usize) -> io::Result<&[u8]> {
         let back = self.pos + 1 - n;
         if back >= 0 {
-            return Ok(&self.buf[self.pos-n..self.pos])
+            return Ok(&self.buf[self.pos - n..self.pos]);
         }
 
         let prev = self.pos;
@@ -264,10 +263,9 @@ impl<T: Source> Tokenizer<T> {
         Ok(&self.buf[..n])
     }
 
-
     pub fn read_byte(&mut self) -> io::Result<Option<u8>> {
         let Some(data) = self.read_bytes(1)? else {
-            return Ok(None)
+            return Ok(None);
         };
         Ok(Some(data[0]))
     }
@@ -287,11 +285,11 @@ impl<T: Source> Tokenizer<T> {
             self.pos = self.len;
             self.seek(io::SeekFrom::Current(self.left_pos() as i64))?;
             if !self.ensure(n)? {
-                return Ok(None)
+                return Ok(None);
             }
             ret.extend(self.buf[..n].iter());
             Ok(Some(Cow::Owned(ret)))
-        }else {
+        } else {
             if remaining_size < n {
                 if self.pos > 0 {
                     self.buf.copy_within(self.pos..self.len, 0);
@@ -300,12 +298,12 @@ impl<T: Source> Tokenizer<T> {
                 self.pos = 0;
             }
             if !self.ensure(n)? {
-                return Ok(None)
+                return Ok(None);
             }
             self.pos += n;
-            Ok(Some(Cow::Borrowed(&self.buf[self.pos-n..self.pos])))
+            Ok(Some(Cow::Borrowed(&self.buf[self.pos - n..self.pos])))
         }
-     }   
+    }
 }
 
 impl<T: Source> Tokenizer<T> {
@@ -314,26 +312,37 @@ impl<T: Source> Tokenizer<T> {
             src: src,
             len: 0,
             pos: 0,
-            buf: vec![0;1024*8],
+            buf: vec![0; 1024 * 8],
             seek_buf: vec![],
             _seek: 0,
         }
     }
 
-    pub fn skip_not_skitespace_and_comments(&mut self) -> io::Result<()> {
+    pub fn skip_not_whitespace_and_comments(&mut self) -> io::Result<()> {
         loop {
             let Some(next) = self.consume()? else {
-                return Ok(())
+                return Ok(());
             };
 
             if WhiteSpace::from_repr(next).is_some() {
                 self.back(1)?;
-                return Ok(()) 
+                return Ok(());
             }
 
             if next == b'%' {
                 self.back(1)?;
-                return Ok(())
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn skip_whitespace(&mut self) -> io::Result<()> {
+        loop {
+            let Some(next) = self.consume()? else {
+                return Ok(());
+            };
+            if !WhiteSpace::from_repr(next).is_some() {
+                return self.back(1)
             }
         }
     }
@@ -342,7 +351,7 @@ impl<T: Source> Tokenizer<T> {
         let mut in_comment = false;
         loop {
             let Some(next) = self.consume()? else {
-                return Ok(())
+                return Ok(());
             };
             match WhiteSpace::from_repr(next) {
                 Some(ws) => {
@@ -363,7 +372,7 @@ impl<T: Source> Tokenizer<T> {
                     }
                     if !in_comment {
                         self.back(1)?;
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }
@@ -374,7 +383,7 @@ impl<T: Source> Tokenizer<T> {
         let p = match self.peek_byte() {
             Ok(Some(n)) => n,
             Ok(None) => return Object::incomplete("boolean"),
-            Err(e) => return Object::io_err(e)
+            Err(e) => return Object::io_err(e),
         };
 
         match p {
@@ -413,7 +422,7 @@ impl<T: Source> Tokenizer<T> {
             other => return other,
         };
         if let Err(e) = self.skip_whitespace_and_comments() {
-            return Object::io_err(e)
+            return Object::io_err(e);
         }
 
         let start = match self.read_bytes(6) {
@@ -424,7 +433,7 @@ impl<T: Source> Tokenizer<T> {
 
         if start.as_ref() != b"stream" {
             if let Err(e) = self.back(6) {
-                return Object::io_err(e)
+                return Object::io_err(e);
             }
             return Object::Dictionary(info);
         }
@@ -459,14 +468,12 @@ impl<T: Source> Tokenizer<T> {
                 b"FDecodeParms" => {
                     fdp = Some(Box::new(v.clone()));
                 }
-                b"DL" => {
-                    match v {
-                        Object::Integer(vv) => {
-                            dl = Some(vv);
-                        }
-                        _ => return Object::expected_obj("int", &v)
+                b"DL" => match v {
+                    Object::Integer(vv) => {
+                        dl = Some(vv);
                     }
-                }
+                    _ => return Object::expected_obj("int", &v),
+                },
                 _ => {}
             }
         }
@@ -478,7 +485,7 @@ impl<T: Source> Tokenizer<T> {
         if let Some(next) = match self.read_byte() {
             Ok(n) => n,
             Err(e) => return Object::io_err(e),
-        }{
+        } {
             match next {
                 b'\r' => {
                     if let Some(v) = match self.read_byte() {
@@ -486,7 +493,10 @@ impl<T: Source> Tokenizer<T> {
                         Err(e) => return Object::io_err(e),
                     } {
                         if v != b'\n' {
-                            return Object::Invalid(format!("after stream not cr+lf is cr+{:x}", v));
+                            return Object::Invalid(format!(
+                                "after stream not cr+lf is cr+{:x}",
+                                v
+                            ));
                         }
                     } else {
                         return Object::incomplete("after stream cr+?");
@@ -501,18 +511,19 @@ impl<T: Source> Tokenizer<T> {
 
         let stream_data = match self.read_bytes(length as usize) {
             Ok(n) => n,
-            Err(e) => return Object::io_err(e)
+            Err(e) => return Object::io_err(e),
         };
-        if let Some(stream_data) = stream_data.map(|v| v.to_vec()) { // bad to
+        if let Some(stream_data) = stream_data.map(|v| v.to_vec()) {
+            // bad to
             if let Some(vv) = match self.read_byte() {
                 Ok(n) => n,
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             } {
                 match vv {
                     b'\r' => {
                         if let Some(vx) = match self.read_byte() {
                             Ok(n) => n,
-                            Err(e) => return Object::io_err(e)
+                            Err(e) => return Object::io_err(e),
                         } {
                             if vx != b'\n' {
                                 return Object::Invalid(format!(
@@ -525,7 +536,7 @@ impl<T: Source> Tokenizer<T> {
                     b'\n' => {}
                     b'e' => {
                         if let Err(e) = self.back(1) {
-                            return Object::io_err(e)
+                            return Object::io_err(e);
                         }
                     }
                     _ => return Object::Invalid(format!("before endstream not br {:x}", vv)),
@@ -533,7 +544,7 @@ impl<T: Source> Tokenizer<T> {
 
                 if let Some(end_stream) = match self.read_bytes(9) {
                     Ok(n) => n,
-                    Err(e) => return Object::io_err(e)
+                    Err(e) => return Object::io_err(e),
                 } {
                     if end_stream.as_ref() == b"endstream" {
                         return Object::Stream(Stream {
@@ -560,88 +571,98 @@ impl<T: Source> Tokenizer<T> {
 
     fn direct_parse_indirect_ref(&mut self) -> Object {
         if let Ok(index) = self.index(|v| matches!(v, b'0'..=b'9')) {
-            println!("index {:?}", index);
             let v1 = match self.read_range(index) {
                 Ok(Some(n)) => n.to_vec(),
                 Ok(None) => return Object::incomplete("ref-num"),
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             };
-            println!("gogo");
             if let Some(v) = match self.read_byte() {
                 Ok(n) => n,
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             } {
                 if WhiteSpace::from_repr(v).is_some() {
-                   if let Err(e) = self.skip_whitespace_and_comments() {
-                       return Object::io_err(e)
-                   }
-                   if let Ok(two_index) = self.index(|v| matches!(v, b'0'..=b'9')) {
-                       let v2 = match self.read_range(two_index) {
+                    if let Err(e) = self.skip_whitespace_and_comments() {
+                        return Object::io_err(e);
+                    }
+                    if let Ok(two_index) = self.index(|v| matches!(v, b'0'..=b'9')) {
+                        let v2 = match self.read_range(two_index) {
                             Ok(Some(n)) => n.to_vec(),
                             Ok(None) => return Object::incomplete("ref-version-num"),
-                            Err(e) => return Object::io_err(e)
-                       };
-                       if let Some(vv) = match self.read_byte() {
-                           Ok(n) => n,
-                           Err(e) => return Object::io_err(e)
-                       } {
-                           if WhiteSpace::from_repr(vv).is_some() {
-                               if let Err(e) = self.skip_whitespace_and_comments() {
-                                   return Object::io_err(e)
-                               }
-                               if let Some(vv) = match self.read_byte() {
-                                   Ok(n) => n,
-                                   Err(e) => return Object::io_err(e)
-                                   
-                               } {
-                                  match vv {
-                                       b'R' => {
-                                           if let Ok(v1) = String::from_utf8_lossy(v1.as_ref()).parse::<i64>() {
-                                               if let Ok(v2) = String::from_utf8_lossy(v2.as_ref()).parse::<i64>() {
-                                                   return Object::IndirectRef(v1, v2)
-                                               }
-                                           }
-                                       }
+                            Err(e) => return Object::io_err(e),
+                        };
+                        if let Some(vv) = match self.read_byte() {
+                            Ok(n) => n,
+                            Err(e) => return Object::io_err(e),
+                        } {
+                            if WhiteSpace::from_repr(vv).is_some() {
+                                if let Err(e) = self.skip_whitespace_and_comments() {
+                                    return Object::io_err(e);
+                                }
+                                if let Some(vv) = match self.read_byte() {
+                                    Ok(n) => n,
+                                    Err(e) => return Object::io_err(e),
+                                } {
+                                    match vv {
+                                        b'R' => {
+                                            if let Ok(v1) =
+                                                String::from_utf8_lossy(v1.as_ref()).parse::<i64>()
+                                            {
+                                                if let Ok(v2) = String::from_utf8_lossy(v2.as_ref())
+                                                    .parse::<i64>()
+                                                {
+                                                    return Object::IndirectRef(v1, v2);
+                                                }
+                                            }
+                                        }
 
-                                       b'o' => {
-                                           if let Some(bj) = match self.read_bytes(2) {
-                                               Ok(n) => n,
-                                               Err(e) => return Object::io_err(e)
-                                           } {
-                                               if bj.as_ref() == b"bj" {
-                                                   if let Some(inner) = self.parse_object() {
-                                                       match inner {
-                                                           Object::Invalid(_) => {},
-                                                           _ => {
-                                                               if let Err(e) = self.skip_whitespace_and_comments() {
-                                                                   return Object::io_err(e)
-                                                               }
-                                                               if let Some(end) = match self.read_bytes(6) {
-                                                                   Ok(n) => n,
-                                                                   Err(e) => return Object::io_err(e)
-                                                               } {
-                                                                   if end.as_ref() == b"endobj" {
-                                                                        if let Ok(v1) = String::from_utf8_lossy(v1.as_ref()).parse::<i64>() {
+                                        b'o' => {
+                                            if let Some(bj) = match self.read_bytes(2) {
+                                                Ok(n) => n,
+                                                Err(e) => return Object::io_err(e),
+                                            } {
+                                                if bj.as_ref() == b"bj" {
+                                                    if let Some(inner) = self.parse_object() {
+                                                        match inner {
+                                                            Object::Invalid(_) => {}
+                                                            _ => {
+                                                                if let Err(e) = self
+                                                                    .skip_whitespace_and_comments()
+                                                                {
+                                                                    return Object::io_err(e);
+                                                                }
+                                                                if let Some(end) = match self
+                                                                    .read_bytes(6)
+                                                                {
+                                                                    Ok(n) => n,
+                                                                    Err(e) => {
+                                                                        return Object::io_err(e);
+                                                                    }
+                                                                } {
+                                                                    if end.as_ref() == b"endobj" {
+                                                                        if let Ok(v1) =
+                                                                            String::from_utf8_lossy(
+                                                                                v1.as_ref(),
+                                                                            )
+                                                                            .parse::<i64>()
+                                                                        {
                                                                             if let Ok(v2) = String::from_utf8_lossy(v2.as_ref()).parse::<i64>() {
                                                                                 return Object::Object(v1, v2, Box::new(inner))
                                                                             }
                                                                         }
-                                                                   }
-                                                               }
+                                                                    }
+                                                                }
                                                             }
                                                         }
-                                                   }
-                                       
-                                               }
-                                           }
-                                       }
-                                       _ => {}
-                                   }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
-                           }
-                       }
-                   }
-            
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -651,35 +672,29 @@ impl<T: Source> Tokenizer<T> {
 
     pub fn parse_indirect_ref(&mut self) -> Object {
         let raw = self.left_pos();
-        let obj = self.direct_parse_indirect_ref(); 
+        let obj = self.direct_parse_indirect_ref();
 
         match obj {
-            Object::IndirectRef(_, _) => {
-                return obj
-            },
-            Object::Object(_, _, _) => {
-                return obj
-                
-            },
+            Object::IndirectRef(_, _) => return obj,
+            Object::Object(_, _, _) => return obj,
             _ => {
-                println!("?? {:?}", obj);
             }
         }
         if let Err(e) = self.seek(io::SeekFrom::Start(raw)) {
-            return Object::io_err(e)
+            return Object::io_err(e);
         }
-        
-        self.inner_parse_number()       
+
+        self.inner_parse_number()
     }
-    
+
     pub fn parse_object(&mut self) -> Option<Object> {
         if let Err(e) = self.skip_whitespace_and_comments() {
-            return Some(Object::from(e))
+            return Some(Object::from(e));
         }
         let next = match self.peek_byte() {
             Ok(Some(n)) => n,
             Ok(None) => return None,
-            Err(e) => return Some(Object::io_err(e))
+            Err(e) => return Some(Object::io_err(e)),
         };
         match next {
             b'+' | b'-' | b'.' => {
@@ -695,14 +710,14 @@ impl<T: Source> Tokenizer<T> {
                 let mut is_stream = false;
                 if let Some(n) = match self.read_bytes(2) {
                     Ok(n) => n,
-                    Err(e) => return Some(Object::io_err(e))
+                    Err(e) => return Some(Object::io_err(e)),
                 } {
                     if n[1] == b'<' {
                         is_stream = true
                     }
                 }
                 if let Err(e) = self.back(2) {
-                    return Some(Object::io_err(e))
+                    return Some(Object::io_err(e));
                 }
                 if is_stream {
                     return Some(self.parse_stream());
@@ -739,7 +754,7 @@ impl<T: Source> Tokenizer<T> {
             let b = match self.read_byte() {
                 Err(e) => return Object::io_err(e),
                 Ok(Some(b)) => b,
-                Ok(None) => break
+                Ok(None) => break,
             };
             match b {
                 b'.' => {
@@ -761,7 +776,7 @@ impl<T: Source> Tokenizer<T> {
                 }
                 _ => {
                     if let Err(e) = self.back(1) {
-                        return Object::io_err(e)
+                        return Object::io_err(e);
                     }
                     break;
                 }
@@ -796,7 +811,7 @@ impl<T: Source> Tokenizer<T> {
         let mut next = false;
         loop {
             let Some(n) = self.read_byte()? else {
-                return Ok(None)
+                return Ok(None);
             };
             ret = (ret << 4)
                 | match n {
@@ -851,7 +866,7 @@ impl<T: Source> Tokenizer<T> {
             let next = match self.read_byte() {
                 Ok(Some(n)) => n,
                 Ok(None) => return Object::incomplete("hexadecimal string"),
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             };
 
             if pos == 0 && next != b'<' {
@@ -928,17 +943,17 @@ impl<T: Source> Tokenizer<T> {
                 b'\\' => {
                     if let Some(n) = match self.read_byte() {
                         Ok(n) => n,
-                        Err(e) => return Object::io_err(e)
+                        Err(e) => return Object::io_err(e),
                     } {
                         match n {
                             b'\r' => {
                                 if let Some(n) = match self.read_byte() {
                                     Ok(n) => n,
-                                    Err(e) => return Object::io_err(e)
+                                    Err(e) => return Object::io_err(e),
                                 } {
                                     if n != b'\n' {
                                         if let Err(e) = self.back(1) {
-                                            return Object::io_err(e)
+                                            return Object::io_err(e);
                                         }
                                     }
                                 }
@@ -954,11 +969,11 @@ impl<T: Source> Tokenizer<T> {
                             b'\\' => ret.push(b'\\'),
                             b'0'..=b'7' => {
                                 if let Err(e) = self.back(1) {
-                                    return Object::io_err(e)
+                                    return Object::io_err(e);
                                 }
                                 if let Some(v) = match self.parse_string_eight() {
                                     Ok(n) => n,
-                                    Err(e) => return Object::io_err(e)
+                                    Err(e) => return Object::io_err(e),
                                 } {
                                     ret.push(v);
                                 }
@@ -966,7 +981,7 @@ impl<T: Source> Tokenizer<T> {
                             }
                             _ => {
                                 if let Err(e) = self.back(1) {
-                                    return Object::io_err(e)
+                                    return Object::io_err(e);
                                 }
                             }
                         }
@@ -981,9 +996,6 @@ impl<T: Source> Tokenizer<T> {
         }
     }
 
-    
-
-
     pub fn parse_name(&mut self) -> Object {
         let mut pos = 0;
         let mut ret = Vec::new();
@@ -991,7 +1003,7 @@ impl<T: Source> Tokenizer<T> {
             let next = match self.read_byte() {
                 Ok(Some(n)) => n,
                 Ok(None) => break,
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             };
 
             if pos == 0 && next != b'/' {
@@ -1002,7 +1014,7 @@ impl<T: Source> Tokenizer<T> {
                 b'/' => {
                     if pos != 0 {
                         if let Err(e) = self.back(1) {
-                            return Object::io_err(e)
+                            return Object::io_err(e);
                         }
                         break;
                     }
@@ -1010,7 +1022,7 @@ impl<T: Source> Tokenizer<T> {
                 b'#' => {
                     if let Some(v) = match self.parse_16() {
                         Ok(n) => n,
-                        Err(e) => return Object::io_err(e)
+                        Err(e) => return Object::io_err(e),
                     } {
                         ret.push(v);
                         continue;
@@ -1020,7 +1032,7 @@ impl<T: Source> Tokenizer<T> {
                     if Delimiter::from_repr(next).is_some() || WhiteSpace::from_repr(next).is_some()
                     {
                         if let Err(e) = self.back(1) {
-                            return Object::io_err(e)
+                            return Object::io_err(e);
                         }
                         break;
                     }
@@ -1037,7 +1049,7 @@ impl<T: Source> Tokenizer<T> {
     pub fn parse_null(&mut self) -> Object {
         if let Some(v) = match self.read_bytes(4) {
             Ok(n) => n,
-            Err(e) => return Object::io_err(e)
+            Err(e) => return Object::io_err(e),
         } {
             if v.as_ref() == b"null" {
                 return Object::Null;
@@ -1053,7 +1065,7 @@ impl<T: Source> Tokenizer<T> {
             let next = match self.read_byte() {
                 Ok(Some(n)) => n,
                 Ok(None) => return Object::incomplete("array"),
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             };
 
             if pos == 0 {
@@ -1067,7 +1079,7 @@ impl<T: Source> Tokenizer<T> {
                     }
                     _ => {
                         if let Err(e) = self.back(1) {
-                            return Object::io_err(e)
+                            return Object::io_err(e);
                         }
                         if let Some(v) = self.parse_object() {
                             if matches!(v, Object::Invalid(_)) {
@@ -1090,7 +1102,7 @@ impl<T: Source> Tokenizer<T> {
         let nb = match self.read_bytes(2) {
             Ok(Some(n)) => n,
             Ok(None) => return Object::incomplete("dictionary"),
-            Err(e) => return Object::io_err(e)
+            Err(e) => return Object::io_err(e),
         };
 
         if nb.as_ref() != b"<<" {
@@ -1100,15 +1112,15 @@ impl<T: Source> Tokenizer<T> {
             let next = match self.peek_byte() {
                 Ok(Some(n)) => n,
                 Ok(None) => return Object::incomplete("dictionary"),
-                Err(e) => return Object::io_err(e)
+                Err(e) => return Object::io_err(e),
             };
 
             match next {
                 b'>' => {
                     if let Some(end) = match self.read_bytes(2) {
                         Ok(n) => n,
-                        Err(e) => return Object::io_err(e)
-                    }{
+                        Err(e) => return Object::io_err(e),
+                    } {
                         if end[1] == b'>' {
                             return Object::Dictionary(ret);
                         }
@@ -1235,10 +1247,22 @@ mod tests {
 
     #[test]
     fn parse_edge_cases() {
-        assert_eq!(Tokenizer::new(Cursor::new(b"5")).parse_number(), Object::Integer(5));
-        assert_eq!(Tokenizer::new(Cursor::new(b"0")).parse_number(), Object::Integer(0));
-        assert_eq!(Tokenizer::new(Cursor::new(b"0.")).parse_number(), Object::Real(0.0));
-        assert_eq!(Tokenizer::new(Cursor::new(b".0")).parse_number(), Object::Real(0.0));
+        assert_eq!(
+            Tokenizer::new(Cursor::new(b"5")).parse_number(),
+            Object::Integer(5)
+        );
+        assert_eq!(
+            Tokenizer::new(Cursor::new(b"0")).parse_number(),
+            Object::Integer(0)
+        );
+        assert_eq!(
+            Tokenizer::new(Cursor::new(b"0.")).parse_number(),
+            Object::Real(0.0)
+        );
+        assert_eq!(
+            Tokenizer::new(Cursor::new(b".0")).parse_number(),
+            Object::Real(0.0)
+        );
     }
 
     #[test]
@@ -3240,7 +3264,7 @@ mod tests {
         // 间接引用格式: object_number generation_number R
         // object_number: 正整数
         // generation_number: 非负整数
-        
+
         // ========== 基本间接引用 ==========
         let cases: &[(&[u8], i64, i64)] = &[
             // 基本格式
@@ -3264,12 +3288,14 @@ mod tests {
             match tokenizer.parse_indirect_ref() {
                 Object::IndirectRef(obj_num, gen_num) => {
                     assert_eq!(
-                        obj_num, expected_obj_num,
+                        obj_num,
+                        expected_obj_num,
                         "Input: {:?} Object number mismatch",
                         String::from_utf8_lossy(input)
                     );
                     assert_eq!(
-                        gen_num, expected_gen_num,
+                        gen_num,
+                        expected_gen_num,
                         "Input: {:?} Generation number mismatch",
                         String::from_utf8_lossy(input)
                     );
@@ -3291,7 +3317,12 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_array() {
                 Object::Array(elements) => {
-                    assert_eq!(elements.len(), 1, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        elements.len(),
+                        1,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                     assert_eq!(
                         elements[0],
                         Object::IndirectRef(1, 0),
@@ -3312,7 +3343,12 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_array() {
                 Object::Array(elements) => {
-                    assert_eq!(elements.len(), 3, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        elements.len(),
+                        3,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                     assert_eq!(elements[0], Object::IndirectRef(1, 0));
                     assert_eq!(elements[1], Object::IndirectRef(2, 0));
                     assert_eq!(elements[2], Object::IndirectRef(3, 0));
@@ -3330,7 +3366,12 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_array() {
                 Object::Array(elements) => {
-                    assert_eq!(elements.len(), 4, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        elements.len(),
+                        4,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                     assert_eq!(elements[0], Object::Name(b"Type".to_vec()));
                     assert_eq!(elements[1], Object::IndirectRef(1, 0));
                     assert_eq!(elements[2], Object::String(b"hello".to_vec()));
@@ -3353,7 +3394,12 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_dictionary() {
                 Object::Dictionary(entries) => {
-                    assert_eq!(entries.len(), 1, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        entries.len(),
+                        1,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                     assert_eq!(entries[0].0, b"Parent");
                     assert_eq!(entries[0].1, Object::IndirectRef(1, 0));
                 }
@@ -3370,10 +3416,18 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_dictionary() {
                 Object::Dictionary(entries) => {
-                    assert_eq!(entries.len(), 3, "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        entries.len(),
+                        3,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                     assert_eq!(entries[0], (b"Parent".to_vec(), Object::IndirectRef(1, 0)));
                     assert_eq!(entries[1], (b"Kids".to_vec(), Object::IndirectRef(2, 0)));
-                    assert_eq!(entries[2], (b"Resources".to_vec(), Object::IndirectRef(3, 0)));
+                    assert_eq!(
+                        entries[2],
+                        (b"Resources".to_vec(), Object::IndirectRef(3, 0))
+                    );
                 }
                 other => panic!(
                     "Input: {:?} Expected Dictionary, got {:?}",
@@ -3388,8 +3442,16 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_dictionary() {
                 Object::Dictionary(entries) => {
-                    assert_eq!(entries.len(), 3, "Input: {:?}", String::from_utf8_lossy(input));
-                    assert_eq!(entries[0], (b"Type".to_vec(), Object::Name(b"Page".to_vec())));
+                    assert_eq!(
+                        entries.len(),
+                        3,
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
+                    assert_eq!(
+                        entries[0],
+                        (b"Type".to_vec(), Object::Name(b"Page".to_vec()))
+                    );
                     assert_eq!(entries[1], (b"Parent".to_vec(), Object::IndirectRef(1, 0)));
                     assert_eq!(entries[2], (b"Count".to_vec(), Object::Integer(5)));
                 }
@@ -3408,7 +3470,7 @@ mod tests {
         // 格式: object_number generation_number obj ... endobj
         // 返回 Object::Object(obj_num, gen_num, Box<Object>)
         // 使用 parse_direct_obj 明确表示要解析 obj
-        
+
         {
             // 简单字符串对象
             let input = b"12 0 obj\n( Brillig )\nendobj";
@@ -3417,7 +3479,12 @@ mod tests {
                 Object::Object(obj_num, gen_num, inner) => {
                     assert_eq!(obj_num, 12, "Input: {:?}", String::from_utf8_lossy(input));
                     assert_eq!(gen_num, 0, "Input: {:?}", String::from_utf8_lossy(input));
-                    assert_eq!(*inner, Object::String(b" Brillig ".to_vec()), "Input: {:?}", String::from_utf8_lossy(input));
+                    assert_eq!(
+                        *inner,
+                        Object::String(b" Brillig ".to_vec()),
+                        "Input: {:?}",
+                        String::from_utf8_lossy(input)
+                    );
                 }
                 other => panic!(
                     "Input: {:?} Expected Object::Object(12, 0, String), got {:?}",
@@ -3454,7 +3521,10 @@ mod tests {
                     match *inner {
                         Object::Dictionary(entries) => {
                             assert_eq!(entries.len(), 2);
-                            assert_eq!(entries[0], (b"Type".to_vec(), Object::Name(b"Catalog".to_vec())));
+                            assert_eq!(
+                                entries[0],
+                                (b"Type".to_vec(), Object::Name(b"Catalog".to_vec()))
+                            );
                             assert_eq!(entries[1], (b"Pages".to_vec(), Object::IndirectRef(2, 0)));
                         }
                         other => panic!("Expected Dictionary, got {:?}", other),
@@ -3611,14 +3681,18 @@ mod tests {
     fn parse_indirect_ref_fallback_to_number() {
         // ========== 无法解析为间接引用时，回退到数字解析 ==========
         // 这些输入以数字开头，但不是有效的间接引用，应回退解析为数字
-        
+
         {
             // 单个数字
             let input = b"123";
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::Integer(123) => {}
-                other => panic!("Input: {:?} Expected Integer(123), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Integer(123), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3627,7 +3701,11 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::Integer(1) => {}
-                other => panic!("Input: {:?} Expected Integer(1), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Integer(1), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3638,7 +3716,11 @@ mod tests {
                 Object::Real(v) => {
                     assert!((v - 3.14).abs() < 0.001);
                 }
-                other => panic!("Input: {:?} Expected Real, got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Real, got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3647,7 +3729,11 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::Integer(1) => {}
-                other => panic!("Input: {:?} Expected Integer(1), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Integer(1), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3656,7 +3742,11 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::Integer(-5) => {}
-                other => panic!("Input: {:?} Expected Integer(-5), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Integer(-5), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
     }
@@ -3664,14 +3754,18 @@ mod tests {
     #[test]
     fn parse_indirect_ref_edge_cases() {
         // ========== 间接引用边界情况 ==========
-        
+
         {
             // 间接引用后有其他内容
             let input = b"1 0 R /Name";
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::IndirectRef(1, 0) => {}
-                other => panic!("Input: {:?} Expected IndirectRef(1, 0), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected IndirectRef(1, 0), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3680,7 +3774,11 @@ mod tests {
             let mut t = Tokenizer::new(Cursor::new(input));
             match t.parse_indirect_ref() {
                 Object::IndirectRef(65535, 65535) => {}
-                other => panic!("Input: {:?} Expected IndirectRef(65535, 65535), got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected IndirectRef(65535, 65535), got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3691,7 +3789,11 @@ mod tests {
                 Object::Object(1, 0, inner) => {
                     assert_eq!(*inner, Object::Integer(123));
                 }
-                other => panic!("Input: {:?} Expected Object::Object, got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Object::Object, got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
         {
@@ -3702,7 +3804,11 @@ mod tests {
                 Object::Object(1, 0, inner) => {
                     assert_eq!(*inner, Object::String(b"hello".to_vec()));
                 }
-                other => panic!("Input: {:?} Expected Object::Object, got {:?}", String::from_utf8_lossy(input), other),
+                other => panic!(
+                    "Input: {:?} Expected Object::Object, got {:?}",
+                    String::from_utf8_lossy(input),
+                    other
+                ),
             }
         }
     }
