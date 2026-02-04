@@ -107,14 +107,22 @@ impl<T: Read + Seek> Source for T {}
 pub struct Tokenizer<T: Source> {
     src: T,
     buf: Vec<u8>,
-    seek_buf: Vec<u8>,
     pos: usize,
     len: usize,
     _seek: u64,
+    rev: bool,
+    total_len: u64,
 }
 
 impl<T: Source> Seek for Tokenizer<T> {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, mut pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        if self.rev {
+            pos = match pos {
+                io::SeekFrom::Start(n) => io::SeekFrom::End(-1*n as i64),
+                io::SeekFrom::End(n) => io::SeekFrom::Start((-1*n) as u64),
+                io::SeekFrom::Current(n) => io::SeekFrom::Current(-n),
+            };
+        }
         match pos {
             io::SeekFrom::Start(n) => {
                 if n >= self.start_pos() && n <= self.end_pos() {
@@ -134,6 +142,9 @@ impl<T: Source> Seek for Tokenizer<T> {
         self.pos = 0;
         self.len = 0;
         self._seek = self.src.seek(pos)?;
+        if self.rev {
+            self._seek = self.total_len - self._seek;
+        }
         Ok(self._seek)
     }
 }
@@ -154,9 +165,24 @@ impl<T: Source> Tokenizer<T> {
             self.pos = 0;
         }
 
-        let num = self.src.read(&mut self.buf[remaining..])?;
-        self._seek += num as u64;
+        let mut end = self.buf.capacity();
+        if self.rev {
+            end = remaining + (self.total_len - self._seek) as usize;
+            if end > self.buf.capacity() {
+                end = self.buf.capacity();
+            }
+            // 电表倒转！！
+            let left = (self.total_len - self._seek) as usize;
+            self._seek = self.total_len - self.src.seek(io::SeekFrom::Current(-1 * (if self.buf.capacity() <= left { self.buf.capacity() } else { left }) as i64))?;
+        }
+        let num = self.src.read(&mut self.buf[remaining..end])?;
+        if !self.rev {
+            self._seek += num as u64;
+        }
         self.len += num;
+        if self.rev {
+            self.buf[remaining..self.len].reverse();
+        }
         Ok(num >= n)
     }
 
@@ -301,8 +327,23 @@ impl<T: Source> Tokenizer<T> {
                 return Ok(None);
             }
             self.pos += n;
-            Ok(Some(Cow::Borrowed(&self.buf[self.pos - n..self.pos])))
+
+            let mut ret = Cow::Borrowed(&self.buf[self.pos - n..self.pos]);
+            if self.rev {
+                let mut tmp = ret.into_owned();
+                tmp.reverse();
+                ret = Cow::Owned(tmp);
+            }
+            Ok(Some(ret))
         }
+    }
+
+    pub fn set_rev(&mut self, rev: bool) -> io::Result<()> {
+        if !self.rev && rev {
+            self.total_len = self.src.seek(io::SeekFrom::End(0))?;
+        }
+        self.rev = rev;
+        Ok(())
     }
 }
 
@@ -313,8 +354,9 @@ impl<T: Source> Tokenizer<T> {
             len: 0,
             pos: 0,
             buf: vec![0; 1024 * 8],
-            seek_buf: vec![],
+            rev: false,
             _seek: 0,
+            total_len: 0,
         }
     }
 
@@ -672,6 +714,7 @@ impl<T: Source> Tokenizer<T> {
 
     pub fn parse_indirect_ref(&mut self) -> Object {
         let raw = self.left_pos();
+
         let obj = self.direct_parse_indirect_ref();
 
         match obj {
@@ -783,7 +826,6 @@ impl<T: Source> Tokenizer<T> {
             }
             pos += 1;
         }
-
         let data = match self.read_bytes_at(start as usize, pos) {
             Ok(Some(data)) => data,
             Ok(None) => return Object::incomplete("number"),
