@@ -23,7 +23,7 @@ pub struct Catalog {
 
 pub struct Pages {
     pub count: usize,
-    pub pages: Vec<i64>,
+    pub index: Vec<u64>
 }
 
 pub struct Pdf<T: Source> {
@@ -167,7 +167,7 @@ impl<T: Source> Pdf<T> {
         let mut catalog = Catalog {
             page: Pages {
                 count: 0,
-                pages: vec![],
+                index: vec![],
             },
         };
         let obj = token.parse_direct_obj();
@@ -178,23 +178,7 @@ impl<T: Source> Pdf<T> {
                     Self::must_eq_name(v, b"Catalog")?;
                 }
                 b"Pages" => {
-                    let pos = Self::must_ref(v)?;
-                    token.seek(io::SeekFrom::Start(*ref_hash.get(&pos).unwrap()))?;
-                    let obj = token.parse_direct_obj();
-                    let dic = Self::must_dic(Self::must_obj(&obj)?)?;
-                    for (k, v) in dic {
-                        match k.as_slice() {
-                            b"Count" => {
-                                catalog.page.count = Self::must_i64(v)? as usize;
-                            }
-                            b"Kids" => {
-                                for vv in Self::must_array(v)? {
-                                    catalog.page.pages.push(Self::must_ref(vv)?);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    catalog.page.count = Self::deep_page(&mut catalog.page.index, &mut ref_hash, &mut token, v)?;
                 },
                 _ => {}
             }
@@ -207,6 +191,48 @@ impl<T: Source> Pdf<T> {
             catalog: catalog,
         })
     }
+
+    fn deep_page(index: &mut Vec<u64>, ref_hash: &mut HashMap<i64, u64>, token: &mut Tokenizer<T>, obj: &Object) -> Result<usize, Error> {
+        let dic;
+        let mut pos = 0;
+        let mut inner_obj = None;
+        match obj {
+            Object::IndirectRef(v, _) => {
+                token.seek(io::SeekFrom::Start(*ref_hash.get(&v).unwrap()))?;
+                let obj = token.parse_direct_obj();
+                inner_obj.replace(obj);
+                let obj = Self::must_obj(inner_obj.as_ref().unwrap())?;
+                dic = Self::must_dic(obj)?;
+                pos = *v;
+            },
+            Object::Dictionary(v) => {
+                dic = v;
+            },
+            _ => return Err(Error::Invalid(format!("not dic or obj is {:?}", obj)))
+        }
+
+        let mut count = 0;
+        for (k, v) in dic {
+            match k.as_slice() {
+                b"Count" => {
+                    count = Self::must_i64(v)? as usize;
+                }
+                b"Kids" => {
+                    for vv in Self::must_array(v)? {
+                        Self::deep_page(index, ref_hash, token, vv)?;
+                    }
+                }
+                b"Type" => {
+                    if Self::eq_name(v, b"Page")? {
+                       index.push(pos as u64);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(count)
+    }
+    
     pub fn must_array(obj: &Object) -> Result<&[Object], Error> {
         match obj {
             Object::Array(obj) => Ok(obj),
