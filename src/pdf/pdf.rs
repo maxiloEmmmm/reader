@@ -1,13 +1,14 @@
 use std::{
-    collections::HashMap, f32::MIN_POSITIVE, fs::{File, OpenOptions}, io::{self, Cursor, Error as stdIOErr, Read, Seek}
+    collections::{HashMap, HashSet}, f32::MIN_POSITIVE, fs::{File, OpenOptions}, io::{self, Cursor, Error as stdIOErr, Read, Seek}
 };
 
-use crate::pdf::tokenizer::{Object, Source, Tokenizer};
+use crate::pdf::tokenizer::{Error as TokenError, Object, Source, Tokenizer};
 
 use thiserror::Error;
 
 const TRAILER_TOKEN: &[u8] = b"trailer";
 const START_XREF: &[u8] = b"startxref";
+const CONTENTS_KEY: &[u8] = b"contents";
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -15,6 +16,8 @@ pub enum Error {
     Invalid(String),
     #[error("handle io")]
     IO(#[from] stdIOErr),
+    #[error("object {0:?}")]
+    Object(#[from] TokenError)
 }
 
 pub struct Catalog {
@@ -89,16 +92,16 @@ impl<T: Source> Pdf<T> {
             }
             token.skip_whitespace_and_comments()?;
 
-            let mut index = Self::must_i64(&token.parse_number())?;
+            let mut index = Object::must_i64(&token.parse_number())?;
             token.skip_whitespace_and_comments()?;
 
-            let mut sum= Self::must_i64(&token.parse_number())?;
+            let mut sum= Object::must_i64(&token.parse_number())?;
 
             loop {
                 token.skip_whitespace_and_comments()?;
-                let mut pos = Self::must_i64(&token.parse_number())?;
+                let mut pos = Object::must_i64(&token.parse_number())?;
                 token.skip_whitespace_and_comments()?;
-                Self::must_i64(&token.parse_number())?;
+                Object::must_i64(&token.parse_number())?;
                 token.skip_whitespace_and_comments()?;
                 let Some(typ) = token.read_byte()? else {
                     return Err(Error::Invalid(format!(
@@ -134,18 +137,18 @@ impl<T: Source> Pdf<T> {
             }
             token.skip_whitespace_and_comments()?;
             let dic = token.parse_dictionary();
-            let dic = Self::must_dic(&dic)?;
+            let dic = Object::must_dic(&dic)?;
             let mut prev = None;
             for (k, v) in dic {
                 match k.as_slice() {
                     b"Root" => {
-                        let pos = Self::must_ref(v)?;    
+                        let pos = Object::must_ref(v)?;    
                         if root.is_none() {
                             root.replace(pos);
                         }
                     }
                     b"Prev" => {
-                        prev.replace(Self::must_i64(v)?);
+                        prev.replace(Object::must_i64(v)?);
                     }
                     _ => {}
                 }
@@ -171,11 +174,11 @@ impl<T: Source> Pdf<T> {
             },
         };
         let obj = token.parse_direct_obj();
-        let dic = Self::must_dic(Self::must_obj(&obj)?)?;
+        let dic = Object::must_dic(Object::must_obj(&obj)?)?;
         for (k, v) in dic {
             match k.as_slice() {
                 b"Type" => {
-                    Self::must_eq_name(v, b"Catalog")?;
+                    Object::must_eq_name(v, b"Catalog")?;
                 }
                 b"Pages" => {
                     catalog.page.count = Self::deep_page(&mut catalog.page.index, &mut ref_hash, &mut token, v)?;
@@ -201,8 +204,8 @@ impl<T: Source> Pdf<T> {
                 token.seek(io::SeekFrom::Start(*ref_hash.get(&v).unwrap()))?;
                 let obj = token.parse_direct_obj();
                 inner_obj.replace(obj);
-                let obj = Self::must_obj(inner_obj.as_ref().unwrap())?;
-                dic = Self::must_dic(obj)?;
+                let obj = Object::must_obj(inner_obj.as_ref().unwrap())?;
+                dic = Object::must_dic(obj)?;
                 pos = *v;
             },
             Object::Dictionary(v) => {
@@ -215,15 +218,15 @@ impl<T: Source> Pdf<T> {
         for (k, v) in dic {
             match k.as_slice() {
                 b"Count" => {
-                    count = Self::must_i64(v)? as usize;
+                    count = Object::must_i64(v)? as usize;
                 }
                 b"Kids" => {
-                    for vv in Self::must_array(v)? {
+                    for vv in Object::must_array(v)? {
                         Self::deep_page(index, ref_hash, token, vv)?;
                     }
                 }
                 b"Type" => {
-                    if Self::eq_name(v, b"Page")? {
+                    if Object::eq_name(v, b"Page")? {
                        index.push(pos as u64);
                     }
                 }
@@ -233,52 +236,120 @@ impl<T: Source> Pdf<T> {
         Ok(count)
     }
     
-    pub fn must_array(obj: &Object) -> Result<&[Object], Error> {
-        match obj {
-            Object::Array(obj) => Ok(obj),
-            other => Err(Error::Invalid(format!("want Array, is {:?}", other)))
-        }
-        
-    }
-    pub fn must_i64(obj: &Object) -> Result<i64, Error> {
-        match obj {
-            Object::Integer(obj) => Ok(*obj),
-            other => Err(Error::Invalid(format!("want i64, is {:?}", other)))
-        }
+
+    pub fn dump_ref(&mut self, xref: u64) -> Result<String, Error> {
+        let pos = self.xref.get(&(xref as i64)).ok_or(Error::Invalid("unknown ref".to_owned()))?;
+        self.token.seek(io::SeekFrom::Start(*pos))?;
+        let object = self.token.parse_direct_obj();
+        let object = Object::must_obj(&object)?;
+        self.dump_obj(object, "")
     }
 
-    pub fn must_dic(obj: &Object) -> Result<&[(Vec<u8>, Object)], Error> {
-        match obj {
-            Object::Dictionary(obj) => Ok(obj),
-            other => Err(Error::Invalid(format!("want Dic, is {:?}", other)))
-        }
-    }
-    
-    pub fn must_obj(obj: &Object) -> Result<&Box<Object>, Error> {
-        match obj {
-            Object::Object(_, _, obj) => Ok(obj),
-            other => Err(Error::Invalid(format!("want Obj, is {:?}", other)))
-        }
+
+    pub fn dump_obj(&mut self, obj: &Object, prefix: &str) -> Result<String, Error> {
+        self._dump_obj(&mut HashSet::new(), obj, prefix)
     }
 
-    pub fn must_ref(obj: &Object) -> Result<i64, Error> {
+    fn _dump_obj(&mut self, ref_set: &mut HashSet<i64>, obj: &Object, prefix: &str) -> Result<String, Error> {
+        let mut ret = String::new();
+        ret.push_str(prefix);
         match obj {
-            Object::IndirectRef(pos, _) => Ok(*pos),
-            other => Err(Error::Invalid(format!("want Ref, is {:?}", other)))
+            Object::Boolean(n) => {
+                if *n {
+                    ret.push_str("true");
+                }else {
+                    ret.push_str("false");
+                }
+            },
+            Object::Integer(n) => {
+                ret.push_str(&n.to_string());
+            },
+            Object::Real(n) => {
+                ret.push_str(&n.to_string());
+            },
+            Object::String(items) => {
+                ret.push_str(str::from_utf8(items.as_slice()).unwrap_or(&format!("{:?}", items)));
+            },
+            Object::Invalid(n) => {
+                ret.push_str(n.as_str());
+            },
+            Object::Name(items) => {
+                ret.push_str("/");
+                ret.push_str(str::from_utf8(items.as_slice()).unwrap_or(&format!("{:?}", items)));
+            },
+            Object::Null => {
+                ret.push_str("null");
+            },
+            Object::Array(objects) => {
+                ret.push_str("[\n");
+                let sub_prefix = format!("  {}", prefix);
+                for item in objects {
+                    ret.push_str(self._dump_obj(ref_set, item, sub_prefix.as_str())?.as_str());
+                    ret.push_str("\n");
+                }
+                ret.push_str(prefix);
+                ret.push_str("]\n");
+            },
+            Object::Dictionary(items) => {
+                ret.push_str("<<\n");
+                let sub_prefix = format!("  {}", prefix);
+                for (k, item) in items {
+                    ret.push_str(sub_prefix.as_str());
+                    ret.push_str(str::from_utf8(k.as_slice()).unwrap_or(&format!("{:?}", k)));
+                    ret.push_str(": ");
+                    ret.push_str(self._dump_obj(ref_set, item, sub_prefix.as_str())?.as_str());
+                    ret.push_str("\n");
+                }
+                ret.push_str(prefix);
+                ret.push_str(">>\n");
+            },
+            Object::Stream(stream) => {
+                ret.push_str(&format!("stream[{}]", stream.length));
+                // ret.push_str("  ");
+                // ret.push_str(prefix);
+                // ret.push_str(str::from_utf8(stream.data.as_slice()).unwrap_or(&format!("{:?}", stream.data)));
+            },
+            Object::IndirectRef(pos, _) => {
+                if ref_set.contains(pos) {
+                    ret.push_str("ref ");
+                    ret.push_str(pos.to_string().as_str());
+                    return Ok(ret)
+                }
+                ref_set.insert(*pos);
+                self.token.seek(io::SeekFrom::Start(*self.xref.get(pos).ok_or(Error::Invalid("not found ref".to_owned()))?))?;
+                let object = self.token.parse_direct_obj();
+                let object = Object::must_obj(&object)?;
+                ret.push_str(self._dump_obj(ref_set, object, &format!("  {}", prefix))?.as_str());
+            },
+            Object::Object(_, _, object) => {
+                ret.push_str(self._dump_obj(ref_set, object, &format!("  {}", prefix))?.as_str());
+            },
         }
-    }
-    
-    pub fn eq_name(obj: &Object, n: &[u8]) -> Result<bool, Error> {
-        match obj {
-            Object::Name(v) => Ok(v.as_slice() == n),
-            other => Err(Error::Invalid(format!("want Name, is {:?}", other)))
-        }
+        Ok(ret)
     }
 
-    pub fn must_eq_name(obj: &Object, n: &[u8]) -> Result<(), Error> {
-        if !Self::eq_name(obj, n)? {
-            return Err(Error::Invalid("no eq".to_owned()))
-        }
+    pub fn page(&mut self, n: u64) -> Result<Page, Error> {
+        let xref = self.catalog.page.index.get(n as usize - 1).ok_or(Error::Invalid("out of max page".to_owned()))?;
+        let obj = self.ref_object(*xref as i64)?;
+        let cs = Object::dic_key(&obj, CONTENTS_KEY)?;
+        let cs = Object::must_array(&cs)?;
+        Ok(Page{
+            content: cs.to_vec(),
+        })
+    }
+
+    fn ref_object(&mut self, n: i64) -> Result<Object, Error> {
+        self.seek_ref(n)?;
+        self.token.parse_object().ok_or(Error::Invalid("no more".to_owned()))
+    }
+
+    fn resolve_ref_pos(&mut self, n: i64) -> Result<u64, Error> {
+        self.xref.get(&n).map(|v| *v).ok_or(Error::Invalid("unknown ref".to_owned()))        
+    }
+
+    fn seek_ref(&mut self, n: i64) -> Result<(), Error> {
+        let pos = self.resolve_ref_pos(n)?;
+        self.token.seek(io::SeekFrom::Start(pos))?;
         Ok(())
     }
 }
@@ -296,4 +367,10 @@ impl TryFrom<Vec<u8>> for Pdf<Cursor<Vec<u8>>> {
     fn try_from(src: Vec<u8>) -> Result<Self, Error> {
         Self::new(Cursor::new(src))
     }
+}
+
+
+#[derive(Debug)]
+pub struct Page {
+    pub content: Vec<Object>
 }

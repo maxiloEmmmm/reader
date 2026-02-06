@@ -1,13 +1,10 @@
 use core::slice;
 use std::{
-    borrow::Cow,
-    env::JoinPathsError,
-    io::{self, ErrorKind, Read, Seek},
-    ops::Range,
-    string::FromUtf8Error,
+    borrow::Cow, env::JoinPathsError, fmt::Display, io::{self, ErrorKind, Read, Seek}, ops::Range, string::FromUtf8Error
 };
 
 use strum_macros::FromRepr;
+use thiserror::Error;
 
 #[repr(u8)]
 #[derive(FromRepr, Debug, PartialEq)]
@@ -78,6 +75,17 @@ pub struct Stream {
     pub dl: Option<i64>,
 }
 
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("invalid resource {0}")]
+    Invalid(String),
+    #[error("not found")]
+    NotFound,
+    #[error("not type {0}, is {1:?}")]
+    Type(String, Object),
+}
+
+
 impl Object {
     pub fn unexpected(what: &str, pos: usize) -> Self {
         Self::Invalid(format!("unexpected to see {} at {}", what, pos))
@@ -98,6 +106,62 @@ impl Object {
     pub fn io_err(err: io::Error) -> Self {
         Self::Invalid(format!("io::error {}", err.to_string()))
     }
+
+    pub fn dic_key<'a>(obj: &'a Object, key: &[u8]) -> Result<&'a Object, Error> {
+        for (k, v) in Self::must_dic(obj)? {
+            if k == key {
+                return Ok(v)
+            }
+        }
+        Err(Error::NotFound)
+    }
+    pub fn must_array(obj: &Object) -> Result<&[Object], Error> {
+        match obj {
+            Object::Array(obj) => Ok(obj),
+            _ => Err(Error::Type("array".to_owned(), obj.to_owned()))
+        }
+    }
+    pub fn must_i64(obj: &Object) -> Result<i64, Error> {
+        match obj {
+            Object::Integer(obj) => Ok(*obj),
+            _ => Err(Error::Type("i64".to_owned(), obj.to_owned()))
+        }
+    }
+
+    pub fn must_dic(obj: &Object) -> Result<&[(Vec<u8>, Object)], Error> {
+        match obj {
+            Object::Dictionary(obj) => Ok(obj),
+            _ => Err(Error::Type("dic".to_owned(), obj.to_owned()))
+        }
+    }
+    
+    pub fn must_obj(obj: &Object) -> Result<&Box<Object>, Error> {
+        match obj {
+            Object::Object(_, _, obj) => Ok(obj),
+            _ => Err(Error::Type("obj".to_owned(), obj.to_owned()))
+        }
+    }
+
+    pub fn must_ref(obj: &Object) -> Result<i64, Error> {
+        match obj {
+            Object::IndirectRef(pos, _) => Ok(*pos),
+            _ => Err(Error::Type("ref".to_owned(), obj.to_owned()))
+        }
+    }
+    
+    pub fn eq_name(obj: &Object, n: &[u8]) -> Result<bool, Error> {
+        match obj {
+            Object::Name(v) => Ok(v.as_slice() == n),
+            _ => Err(Error::Type("name".to_owned(), obj.to_owned()))
+        }
+    }
+
+    pub fn must_eq_name(obj: &Object, n: &[u8]) -> Result<(), Error> {
+        if !Self::eq_name(obj, n)? {
+            return Err(Error::Invalid("no eq".to_owned()))
+        }
+        Ok(())
+    }
 }
 
 pub trait Source: Read + Seek {}
@@ -112,6 +176,7 @@ pub struct Tokenizer<T: Source> {
     _seek: u64,
     rev: bool,
     total_len: u64,
+    debug: bool
 }
 
 
@@ -154,15 +219,16 @@ impl<T: Source> Seek for Tokenizer<T> {
 // 内部pos不对外暴露, 所以对外没有peek这种操作，只有相对于某个偏移的读取
 impl<T: Source> Tokenizer<T> {
     pub fn ensure(&mut self, mut n: usize) -> io::Result<bool> {
-        let remaining = self.len - self.pos;
+        let mut remaining = self.len - self.pos;
         if remaining >= n {
             return Ok(true);
         }
 
         if self.pos > 0 {
-            self.buf.copy_within(self.pos.., 0);
-            self.len = remaining;
+            self.buf.copy_within(self.pos..self.len, 0);
+            self.len = 0;
             n -= remaining;
+            remaining = 0;
             self.pos = 0;
         }
 
@@ -191,7 +257,7 @@ impl<T: Source> Tokenizer<T> {
         if self.rev {
             self.buf[remaining..self.len].reverse();
         }
-        Ok(num >= n)
+        Ok(remaining + num >= n)
     }
 
     pub fn current_pos(&self) -> usize {
@@ -317,11 +383,21 @@ impl<T: Source> Tokenizer<T> {
             ret.extend(self.buf[self.pos..self.len].iter());
             n -= remaining_size;
             self.pos = self.len;
-            self.seek(io::SeekFrom::Current(self.left_pos() as i64))?;
-            if !self.ensure(n)? {
-                return Ok(None);
+            loop {
+                let mut tmp = n;
+                if tmp > self.buf.capacity() {
+                    tmp = self.buf.capacity();
+                }
+                if !self.ensure(tmp)? {
+                    return Ok(None);
+                }
+                ret.extend(self.buf[..tmp].iter());
+                self.pos = tmp;
+                n -= tmp;
+                if n == 0 {
+                    break;
+                }
             }
-            ret.extend(self.buf[..n].iter());
             Ok(Some(Cow::Owned(ret)))
         } else {
             if remaining_size < n {
@@ -359,6 +435,14 @@ impl<T: Source> Tokenizer<T> {
         self.rev = rev;
         Ok(())
     }
+
+    pub fn left(&self) -> &[u8] {
+        &self.buf[self.pos..self.len]
+    }
+
+    pub fn set_debug(&mut self, debug: bool) {
+        self.debug = debug;
+    }
 }
 
 impl<T: Source> Tokenizer<T> {
@@ -371,6 +455,7 @@ impl<T: Source> Tokenizer<T> {
             rev: false,
             _seek: 0,
             total_len: 0,
+            debug: false,
         }
     }
 
@@ -679,7 +764,11 @@ impl<T: Source> Tokenizer<T> {
                                                 if bj.as_ref() == b"bj" {
                                                     if let Some(inner) = self.parse_object() {
                                                         match inner {
-                                                            Object::Invalid(_) => {}
+                                                            Object::Invalid(n) => {
+                                                                if self.debug {
+                                                                    println!("obj inner parse failed {}", n);
+                                                                }
+                                                            }
                                                             _ => {
                                                                 if let Err(e) = self
                                                                     .skip_whitespace_and_comments()
@@ -734,7 +823,11 @@ impl<T: Source> Tokenizer<T> {
         match obj {
             Object::IndirectRef(_, _) => return obj,
             Object::Object(_, _, _) => return obj,
-            _ => {}
+            other => {
+                if self.debug {
+                    println!("not obj & ref is {:?}", other)
+                }
+            }
         }
         if let Err(e) = self.seek(io::SeekFrom::Start(raw)) {
             return Object::io_err(e);
